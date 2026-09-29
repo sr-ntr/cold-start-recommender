@@ -1,0 +1,16 @@
+{
+  "num_users": 16058864,
+  "num_items": 1395130,
+  "latent_dim": 16,
+  "batch_size": 1024,
+  "learning_rate": 0.01,
+  "epochs": 1,
+  "random_seed": 42,
+  "rating_mapping": {
+    "1": -1.0,
+    "2": -0.5,
+    "3": 0.0,
+    "4": 0.5,
+    "5": 1.0
+  }
+}

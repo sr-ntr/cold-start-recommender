@@ -29,11 +29,10 @@ env/
 # Models / checkpoints
 # =========================
 
-models/
-*.pt
-*.pth
-*.ckpt
-*.bin
+models/*.pt
+models/*.pth
+models/*.ckpt
+models/*.bin
 
 
 # =========================
