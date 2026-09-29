@@ -31,13 +31,6 @@ def load_model():
     return model
 
 
-# if __name__ == "__main__":
-#     model = load_model()
-
-#     print(f"Model: {MODEL_NAME}")
-#     print(f"Embedding dimension: {model.get_embedding_dimension()}")
-#     print(f"Device: {model.device}")
-
 CHUNK_SIZE = 5_000
 
 
@@ -62,21 +55,6 @@ def load_metadata_chunk(con, asins):
 
     return con.sql(query).df()
 
-
-# if __name__ == "__main__":
-#     model = load_model()
-
-#     catalog = load_catalog()
-
-#     con = duckdb.connect()
-
-#     test_asins = catalog["parent_asin"].iloc[:CHUNK_SIZE].tolist()
-
-#     metadata = load_metadata_chunk(con, test_asins)
-
-#     print(f"Requested products: {len(test_asins):,}")
-#     print(f"Metadata rows returned: {len(metadata):,}")
-#     print(metadata.head())
 
 from src.features.product_text import build_truncated_product_text
 
@@ -111,31 +89,68 @@ def generate_test_embeddings(model, metadata, output_path):
     print(f"Saved embeddings to: {output_path}")
 
 
-test_embeddings = np.load(
-    PROJECT_ROOT / "data" / "processed" / "test_embeddings.npy",
-    mmap_mode="r",
-)
+# Using simple-writer
 
-print(test_embeddings.shape)
-print(test_embeddings.dtype)
-print(np.linalg.norm(test_embeddings[0]))
 
-# if __name__ == "__main__":
-#     model = load_model()
+def generate_embeddings(model, catalog, con):
+    num_products = len(catalog)
 
-#     catalog = load_catalog()
+    embeddings = np.lib.format.open_memmap(
+        EMBEDDING_PATH,
+        mode="w+",
+        dtype=np.float32,
+        shape=(num_products, EMBEDDING_DIM),
+    )
 
-#     con = duckdb.connect()
+    for start in range(0, num_products, CHUNK_SIZE):
+        end = min(start + CHUNK_SIZE, num_products)
 
-#     test_catalog = catalog.iloc[:CHUNK_SIZE]
+        chunk = catalog.iloc[start:end]
 
-#     metadata = load_metadata_chunk(
-#         con,
-#         test_catalog["parent_asin"].tolist(),
-#     )
+        metadata = load_metadata_chunk(
+            con,
+            chunk["parent_asin"].tolist(),
+        )
 
-#     generate_test_embeddings(
-#         model,
-#         metadata,
-#         PROJECT_ROOT / "data" / "processed" / "test_embeddings.npy",
-#     )
+        metadata = (
+            chunk[["item_idx", "parent_asin"]]
+            .merge(
+                metadata,
+                on="parent_asin",
+                how="left",
+                validate="one_to_one",
+            )
+            .sort_values("item_idx")
+        )
+
+        texts = [
+            build_truncated_product_text(
+                row,
+                model.tokenizer,
+            )
+            for _, row in metadata.iterrows()
+        ]
+
+        chunk_embeddings = model.encode(
+            texts,
+            batch_size=BATCH_SIZE,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+
+        embeddings[start:end] = chunk_embeddings.astype(np.float32)
+
+        print(f"Processed {end:,}/{num_products:,} ({end / num_products:.1%})")
+
+    embeddings.flush()
+
+    print(f"Saved embeddings to: {EMBEDDING_PATH}")
+
+
+if __name__ == "__main__":
+    model = load_model()
+    catalog = load_catalog()
+    con = duckdb.connect()
+
+    generate_embeddings(model, catalog, con)
