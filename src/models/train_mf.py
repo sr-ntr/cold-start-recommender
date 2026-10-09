@@ -15,10 +15,11 @@ TRAINING_DIR = PROJECT_ROOT / "data" / "processed" / "mf_training"
 
 BATCH_SIZE = 1024
 RANDOM_SEED = 42
+EPOCHS = 3
 
 MODEL_DIR = Path("models")
-MODEL_PATH = MODEL_DIR / "mf_baseline.pt"
-CONFIG_PATH = MODEL_DIR / "mf_baseline_config.json"
+MODEL_PATH = MODEL_DIR / "mf_3epoch.pt"
+CONFIG_PATH = MODEL_DIR / "mf_3epoch_config.json"
 
 LATENT_DIM = 16
 
@@ -52,6 +53,15 @@ class MatrixFactorization(nn.Module):
         )
 
         self.global_bias = nn.Parameter(torch.tensor(0.0))
+        self._init_weights()
+
+    def _init_weights(self):
+        # Scale embeddings so untrained dot products remain near 0.0,
+        # preventing random noise from dominating Top-K recommendation ranking.
+        nn.init.normal_(self.user_embeddings.weight, mean=0.0, std=0.01)
+        nn.init.normal_(self.item_embeddings.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.user_bias.weight)
+        nn.init.zeros_(self.item_bias.weight)
 
     def forward(self, user_idx, item_idx):
         user_vec = self.user_embeddings(user_idx)
@@ -76,7 +86,7 @@ def load_partition(path, seed):
     return df
 
 
-def iter_batches(df, batch_size):
+def iter_batches(df, batch_size, device=None):
     for start in range(0, len(df), batch_size):
         batch = df.iloc[start : start + batch_size]
 
@@ -84,20 +94,26 @@ def iter_batches(df, batch_size):
             torch.tensor(
                 batch["user_idx"].to_numpy(),
                 dtype=torch.long,
+                device=device,
             ),
             torch.tensor(
                 batch["mf_item_idx"].to_numpy(),
                 dtype=torch.long,
+                device=device,
             ),
             torch.tensor(
                 batch["target"].to_numpy(),
                 dtype=torch.float32,
+                device=device,
             ),
         )
 
 
 if __name__ == "__main__":
     import time
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     NUM_USERS = 16_058_864
     NUM_ITEMS = 1_395_130
@@ -108,7 +124,7 @@ if __name__ == "__main__":
         num_users=NUM_USERS,
         num_items=NUM_ITEMS,
         latent_dim=LATENT_DIM,
-    )
+    ).to(device)
 
     model.train()
 
@@ -127,56 +143,59 @@ if __name__ == "__main__":
 
     start_time = time.perf_counter()
 
-    for partition_number, partition_path in enumerate(partition_paths):
-        partition_start = time.perf_counter()
+    for epoch in range(EPOCHS):
+        print(f"\nEpoch{epoch + 1}/{EPOCHS}")
+        for partition_number, partition_path in enumerate(partition_paths):
+            partition_start = time.perf_counter()
 
-        df = load_partition(
-            partition_path,
-            seed=RANDOM_SEED + partition_number,
-        )
-
-        partition_loss = 0.0
-        partition_examples = 0
-
-        for batch_users, batch_items, batch_targets in iter_batches(
-            df,
-            BATCH_SIZE,
-        ):
-            optimizer.zero_grad()
-
-            predictions = model(
-                batch_users,
-                batch_items,
+            df = load_partition(
+                partition_path,
+                seed=RANDOM_SEED + partition_number + epoch,
             )
 
-            loss = nn.functional.mse_loss(
-                predictions,
-                batch_targets,
+            partition_loss = 0.0
+            partition_examples = 0
+
+            for batch_users, batch_items, batch_targets in iter_batches(
+                df,
+                BATCH_SIZE,
+                device=device,
+            ):
+                optimizer.zero_grad()
+
+                predictions = model(
+                    batch_users,
+                    batch_items,
+                )
+
+                loss = nn.functional.mse_loss(
+                    predictions,
+                    batch_targets,
+                )
+
+                loss.backward()
+                optimizer.step()
+
+                batch_size = len(batch_targets)
+
+                partition_loss += loss.item() * batch_size
+                partition_examples += batch_size
+
+            total_loss += partition_loss
+            total_examples += partition_examples
+
+            elapsed = time.perf_counter() - partition_start
+
+            print(
+                f"Partition {partition_number + 1}/"
+                f"{len(partition_paths)} "
+                f"| examples = {partition_examples:,} "
+                f"| loss = "
+                f"{partition_loss / partition_examples:.4f} "
+                f"| time = {elapsed:.2f}s"
             )
 
-            loss.backward()
-            optimizer.step()
-
-            batch_size = len(batch_targets)
-
-            partition_loss += loss.item() * batch_size
-            partition_examples += batch_size
-
-        total_loss += partition_loss
-        total_examples += partition_examples
-
-        elapsed = time.perf_counter() - partition_start
-
-        print(
-            f"Partition {partition_number + 1}/"
-            f"{len(partition_paths)} "
-            f"| examples = {partition_examples:,} "
-            f"| loss = "
-            f"{partition_loss / partition_examples:.4f} "
-            f"| time = {elapsed:.2f}s"
-        )
-
-        del df
+            del df
 
     total_elapsed = time.perf_counter() - start_time
 
@@ -196,7 +215,7 @@ if __name__ == "__main__":
         "latent_dim": 16,
         "batch_size": BATCH_SIZE,
         "learning_rate": 0.01,
-        "epochs": 1,
+        "epochs": EPOCHS,
         "random_seed": RANDOM_SEED,
         "rating_mapping": {
             "1": -1.0,
